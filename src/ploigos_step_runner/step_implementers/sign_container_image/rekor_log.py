@@ -228,7 +228,9 @@ class RekorLog(StepImplementer):
             public_key_path = Path("public.pgp")
 
             # gpg will to to console if the public key exists already
-            public_key_path.unlink()
+            if (public_key_path.exists()):
+                print(f"Removing existing public key at {public_key_path.absolute()}")
+                public_key_path.unlink()
 
             print(f"Attempting to export public key for {private_key_fingerprint} to {public_key_path.absolute()}")
             sh.gpg(
