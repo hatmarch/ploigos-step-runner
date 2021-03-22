@@ -29,11 +29,8 @@ Results artifacts output by this step.
 Result Artifact Key                   | Description
 --------------------------------------|------------
 `artifact-log-url`                    | the URL of the Rekor log entry for this artifact
-`container-image-signature-file-md5`  | MD5 hash of signature file
-`container-image-signature-file-sha1` | SHA1 Hash of signature file
 """
 
-import hashlib
 import re
 import sys
 from io import StringIO
@@ -47,20 +44,19 @@ from ploigos_step_runner.utils.io import create_sh_redirect_to_multiple_streams_
 
 # testing
 DEFAULT_CONFIG = {
-    'container-image-signature-file-path': "/workspaces/tssc-demo/secrets/OWNERS.md",
-    'rekor-server-url': 'http://rekor-server-tssc-demo-rekor.apps.cluster-3627.3627.example.opentlc.com',
-    'container-image-signer-pgp-public-key': "/workspaces/tssc-demo/secrets/gpg_public_key",
-    'container-image-signature-private-key-fingerprint': "97901C34A0026E2F2F9E40F992418AD1F23FDF56",
-    'artifact-signature-file-path': "/workspaces/tssc-demo/secrets/artifact-sig.asc"
+    # 'container-image-signature-file-path': "/workspaces/tssc-demo/secrets/OWNERS.md",
+    # 'rekor-server-url': 'http://rekor-server-tssc-demo-rekor.apps.cluster-3627.3627.example.opentlc.com',
+    # 'container-image-signer-pgp-public-key': "/workspaces/tssc-demo/secrets/gpg_public_key",
+    # 'container-image-signature-private-key-fingerprint': "97901C34A0026E2F2F9E40F992418AD1F23FDF56",
+    # 'artifact-signature-file-path': "/workspaces/tssc-demo/secrets/artifact-sig.asc"
 }
 
 
 REQUIRED_CONFIG_OR_PREVIOUS_STEP_RESULT_ARTIFACT_KEYS = [
     'container-image-signature-file-path',
     'container-image-signature-private-key-fingerprint',
-#    'container-image-signature-name',
+    'container-image-signature-name',
     'rekor-server-url',
-    'container-image-signer-pgp-public-key',
     'artifact-signature-file-path'
 ]
 
@@ -116,11 +112,10 @@ class RekorLog(StepImplementer):
 
         # extract step results
         artifact_file_path = self.get_value('container-image-signature-file-path')
-        public_key_file_path = self.get_value('container-image-signer-pgp-public-key')
+        container_signature_name = self.get_value('container-image-signature-name')
         private_key_fingerprint = self.get_value('container-image-signature-private-key-fingerprint')
         rekor_server_url = self.get_value('rekor-server-url')
-        artifact_signature_path = self.get_value('artifact-signature-file-path')
-
+        artifact_signature_path = Path(self.get_value('artifact-signature-file-path'))
 
         try:
             RekorLog.__sign_artifact(
@@ -131,13 +126,29 @@ class RekorLog(StepImplementer):
             log_url = RekorLog.__log_artifact( 
                 artifact_file_path=artifact_file_path,
                 rekor_server_url=rekor_server_url,
-                public_key_file_path=public_key_file_path,
-                signature_file_path=artifact_signature_path
+                private_key_fingerprint=private_key_fingerprint,
+                signature_file_path=artifact_signature_path.absolute()
             )
 
             step_result.add_artifact(
                 name='provenance-log-entry-url', value=log_url,
             )
+
+            # get the previous signature name and replace the last part with our 
+            # artifact signature to store it next to the container signature
+            new_nexus_signature_name =  re.sub( 
+                Path(container_signature_name).name,
+                artifact_signature_path.name,
+                container_signature_name)
+
+            # Add these artifacts to attempt to reuse CurlPush to nexus
+            step_result.add_artifact(
+                name='container-image-signature-name', value=new_nexus_signature_name
+            )
+            step_result.add_artifact(
+                name='container-image-signature-file-path', value=artifact_signature_path.absolute()
+            )
+
 
         except StepRunnerException as error:
             step_result.success = False
@@ -196,7 +207,7 @@ class RekorLog(StepImplementer):
     def __log_artifact(  # pylint: disable=too-many-arguments
             artifact_file_path,
             rekor_server_url,
-            public_key_file_path,
+            private_key_fingerprint,
             signature_file_path
     ):
         """Logs the artifact file path in rekor
@@ -214,10 +225,30 @@ class RekorLog(StepImplementer):
                 stdout_result
             ])
 
+            public_key_path = Path("public.pgp")
+
+            # gpg will to to console if the public key exists already
+            public_key_path.unlink()
+
+            print(f"Attempting to export public key for {private_key_fingerprint} to {public_key_path.absolute()}")
+            sh.gpg(
+                '--export',
+                '--armor',
+                '--output', public_key_path.absolute(),
+                private_key_fingerprint,
+                _out=stdout_callback,
+                _err_to_out=True,
+                _tee='out'
+            )
+
+            print(
+                f"Public key for {private_key_fingerprint} exported to {public_key_path.absolute()}"
+            )
+
             sh.rekor( 
                 'upload',
                 '--rekor_server', rekor_server_url,
-                '--public-key', public_key_file_path,
+                '--public-key', public_key_path.absolute(),
                 '--signature',  signature_file_path,
                 '--artifact',  artifact_file_path,
                 _out=stdout_callback,
@@ -225,7 +256,6 @@ class RekorLog(StepImplementer):
                 _tee='out'
             )
 
-            # FIXME: Get the log url out
             # Output looks like this:
             # Created entry at index 0, available at: 
             # http://rekor-server-tssc-demo-rekor.apps.cluster-3627.3627.example.opentlc.com/api/v1/log/entries/1b64ae04c29363f8f6fa9731a0d1d47dedb0b97fd9b49e7e333b2e54cea060ff
