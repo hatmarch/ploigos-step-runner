@@ -57,7 +57,11 @@ REQUIRED_CONFIG_OR_PREVIOUS_STEP_RESULT_ARTIFACT_KEYS = [
     'container-image-signature-private-key-fingerprint',
     'container-image-signature-name',
     'rekor-server-url',
-    'artifact-signature-file-path'
+    'artifact-signature-file-path',
+# curl-push
+    'container-image-signature-server-password',
+    'container-image-signature-server-url',
+    'container-image-signature-server-username'
 ]
 
 class RekorLog(StepImplementer):
@@ -117,6 +121,17 @@ class RekorLog(StepImplementer):
         rekor_server_url = self.get_value('rekor-server-url')
         artifact_signature_path = Path(self.get_value('artifact-signature-file-path'))
 
+        # extract configs
+        signature_server_url = self.get_value(
+            'container-image-signature-server-url'
+        )
+        signature_server_username = self.get_value(
+            'container-image-signature-server-username'
+        )
+        signature_server_password = self.get_value(
+            'container-image-signature-server-password'
+        )
+
         try:
             RekorLog.__sign_artifact(
                 artifact_file_path=artifact_file_path,
@@ -141,14 +156,25 @@ class RekorLog(StepImplementer):
                 artifact_signature_path.name,
                 container_signature_name)
 
-            # Add these artifacts to attempt to reuse CurlPush to nexus
-            step_result.add_artifact(
-                name='container-image-signature-name', value=new_nexus_signature_name
-            )
-            step_result.add_artifact(
-                name='container-image-signature-file-path', value=artifact_signature_path.absolute()
-            )
+            # # Add these artifacts to attempt to reuse CurlPush to nexus
+            # step_result.add_artifact(
+            #     name='container-image-signature-name', value=new_nexus_signature_name
+            # )
+            # step_result.add_artifact(
+            #     name='container-image-signature-file-path', value=artifact_signature_path.absolute()
+            # )
 
+            artifact_signature_url = RekorLog.__store_artifact(
+                    container_image_signature_file_path=artifact_signature_path.absolute(),
+                    container_image_signature_name=new_nexus_signature_name,
+                    signature_server_url=signature_server_url,
+                    signature_server_username=signature_server_username,
+                    signature_server_password = signature_server_password
+                )
+            
+            step_result.add_artifact(
+                name='artifact-signature-url', value=artifact_signature_url,
+            )
 
         except StepRunnerException as error:
             step_result.success = False
@@ -284,3 +310,50 @@ class RekorLog(StepImplementer):
             ) from error
 
         return log_url
+
+    @staticmethod
+    def __store_artifact(  # pylint: disable=too-many-arguments
+        container_image_signature_file_path,
+        container_image_signature_name,
+        signature_server_url,
+        signature_server_username,
+        signature_server_password
+    ):
+        """Logs the artifact file path in rekor
+
+        Raises
+        ------
+        StepRunnerException
+            If error pushing image signature.
+        """
+        # remove any trailing / from url
+        signature_server_url = re.sub(r'/$', '', signature_server_url)
+        container_image_signature_url = f"{signature_server_url}/{container_image_signature_name}"
+
+        try:
+            stdout_result = StringIO()
+            stdout_callback = create_sh_redirect_to_multiple_streams_fn_callback([
+                sys.stdout,
+                stdout_result
+            ])
+
+            # -s: Silent
+            # -S: Show error
+            # -f: Don't print out failure document
+            # -v: Verbose
+            sh.curl(  # pylint: disable=no-member
+                '-sSfv',
+                '-X', 'PUT',
+                '--user', f"{signature_server_username}:{signature_server_password}",
+                '--upload-file', container_image_signature_file_path,
+                container_image_signature_url,
+                _out=stdout_callback,
+                _err_to_out=True,
+                _tee='out'
+            )
+        except sh.ErrorReturnCode as error:
+            raise StepRunnerException(
+                f"Error pushing signature file to signature server using curl: {error}"
+            ) from error
+
+        return container_image_signature_url
