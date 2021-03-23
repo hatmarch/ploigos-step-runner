@@ -29,6 +29,7 @@ Results artifacts output by this step.
 Result Artifact Key                   | Description
 --------------------------------------|------------
 `artifact-log-url`                    | the URL of the Rekor log entry for this artifact
+`artifact-signature-url`              | the URL where the sig can be found for the artifact
 """
 
 import re
