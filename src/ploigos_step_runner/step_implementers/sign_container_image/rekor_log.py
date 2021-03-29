@@ -231,6 +231,22 @@ class RekorLog(StepImplementer):
             ) from error
 
     @staticmethod
+    def __create_build_output_node( # pylint: disable=too-many-arguments
+        step_name,
+        output_artifact_path,
+        previous_rekor_entry_uuid
+    ):
+        """Creates a build output node that is to be stored in the Rekor immutable database
+
+        Returns
+        -------
+        BuildOutputNodePath
+            Path to the node file (to be signed and then stored in Rekor log)
+        """
+
+    # FIXME: read in a file, run a regex across it, output to a file and return path to it
+
+    @staticmethod
     def __log_artifact(  # pylint: disable=too-many-arguments
             artifact_file_path,
             rekor_server_url,
