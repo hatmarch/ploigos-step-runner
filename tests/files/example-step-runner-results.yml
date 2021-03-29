@@ -1,0 +1,13 @@
+step-runner-results:
+    sign-container-image:
+        RekorLog:
+            artifacts:
+                provenance-log-entry-url: {description: '', value: 'http://rekor-server-tssc-demo-rekor.apps.cluster-0302.0302.example.opentlc.com/api/v1/log/entries/30e83b85f6546157b4737c4a75c96f182bece781456a5502644d99b4fe4e4a7b'}
+            message: "Error pushing signature file to signature server using curl:\
+                \ \n\n  RAN: /usr/bin/curl -sSfv -X PUT --user tssc:REXA2e4PuV9mMhDO\
+                \ --upload-file /workspaces/tssc-demo/secrets/artifact.asc https://nexus-devsecops.apps.cluster-3627.3627.example.opentlc.com/repository/container-image-signatures/platform/ref-quarkus-mvn-jenkins-std-fruit@sha256=df42ba9f9eff7060f68eaf205edf9d26b3d80c55ca47e9c480e594ea1b505736/artifact.asc\n\
+                \n  STDOUT:\n* Could not resolve host: nexus-devsecops.apps.cluster-3627.3627.example.opentlc.com\n\
+                * Closing connection 0\ncurl: (6) Could not resolve host: nexus-devsecops.apps.cluster-3627.3627.example.opentlc.com\n\
+                \n\n  STDERR:\n"
+            sub-step-implementer-name: RekorLog
+            success: false

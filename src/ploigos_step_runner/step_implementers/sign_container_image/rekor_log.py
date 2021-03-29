@@ -38,6 +38,8 @@ from io import StringIO
 from pathlib import Path
 
 import sh
+import base64
+import json
 from ploigos_step_runner import StepImplementer
 from ploigos_step_runner.exceptions import StepRunnerException
 from ploigos_step_runner.step_result import StepResult
@@ -71,7 +73,6 @@ class RekorLog(StepImplementer):
     """
 
     REKOR_LOG_ENTRY_OUTPUT_REGEX = re.compile(r"available at: *([^ ]+)\n$", re.MULTILINE)
-
 
     @staticmethod
     def step_implementer_config_defaults():
@@ -231,7 +232,8 @@ class RekorLog(StepImplementer):
             ) from error
 
     @staticmethod
-    def __create_build_output_node( # pylint: disable=too-many-arguments
+#    def __create_build_output_node( # pylint: disable=too-many-arguments
+    def create_build_output_node( # pylint: disable=too-many-arguments
         step_name,
         output_artifact_path,
         previous_rekor_entry_uuid
@@ -244,7 +246,24 @@ class RekorLog(StepImplementer):
             Path to the node file (to be signed and then stored in Rekor log)
         """
 
-    # FIXME: read in a file, run a regex across it, output to a file and return path to it
+        # Get the output artifact as base64 encoded
+        outputPath = Path(output_artifact_path)
+        if (not outputPath.exists() or not outputPath.is_file()):
+            raise StepRunnerException(
+                f"Cannot open {outputPath.absolute()}"
+            )
+
+        build_node_data = {
+            "stepName": step_name,
+            "stepOutput": base64.b64encode(outputPath.read_text().encode('ascii')).decode('ascii'),
+            "previousRekorUUID": previous_rekor_entry_uuid
+        }
+        outputJson = json.dumps(build_node_data)
+
+        return outputJson
+    #     outputfile = Path(output_artifact_path)
+    #     outputfile.read_text()
+    # # FIXME: read in a file, run a regex across it, output to a file and return path to it
 
     @staticmethod
     def __log_artifact(  # pylint: disable=too-many-arguments
