@@ -4,6 +4,7 @@
 import os
 import re
 import sys
+import hashlib
 from io import IOBase
 from io import StringIO
 from unittest.mock import patch
@@ -142,18 +143,121 @@ class TestStepImplementerRekorLogSourceBase(BaseStepImplementerTestCase):
                 signature_file_path=local_signature_file_path
             )
 
-            decrypted_output = self.__decrypt_sig(
-                signature_file_path=local_signature_file_path,
-                private_key_fingerprint=self.TESTS_GPG_KEY_FINGERPRINT              
-            )
-            expected_output=json.dumps(buildNodeObj)
+            artifact_file_path=os.path.join(temp_dir.path, 'node.json')
+            Path(artifact_file_path).write_text(json.dumps(buildNodeObj))
 
-            self.assertEqual(decrypted_output, expected_output)
 
-    def __decrypt_sig(
+            self.assertTrue(self.__verify_sig(
+                        signature_file_path=local_signature_file_path,
+                        artifact_file_path=artifact_file_path,
+                        private_key_fingerprint=self.TESTS_GPG_KEY_FINGERPRINT
+            ))
+        
+            return buildNodeObj, Path(local_signature_file_path).read_text()
+
+    def test__upload_to_rekor(self):
+        with TempDirectory() as temp_dir:
+            build_node_object, detached_signature_file_contents = self.test__sign_build_output_node()
+
+            try:
+                stdout_result = StringIO()
+                stdout_callback = create_sh_redirect_to_multiple_streams_fn_callback([
+                    sys.stdout,
+                    stdout_result
+                ])
+
+                public_key_path = Path(os.path.join(temp_dir.path, 'test.pub'))
+                signature_file_path = Path(os.path.join(temp_dir.path, 'node-sig.asc'))
+                signature_file_path.write_text(detached_signature_file_contents)
+
+                print(f"Attempting to export public key for {self.TESTS_GPG_KEY_FINGERPRINT} to {public_key_path}")
+                sh.gpg(
+                    '--export',
+                    '--armor',
+                    '--output', public_key_path,
+                    self.TESTS_GPG_KEY_FINGERPRINT,
+                    _out=stdout_callback,
+                    _err_to_out=True,
+                    _tee='out'
+                )
+
+                print(
+                    f"Public key for {self.TESTS_GPG_KEY_FINGERPRINT} exported to {public_key_path}"
+                )
+
+                artifact_file_path=Path(os.path.join(temp_dir.path, 'node.json'))
+                artifact_file_path.write_text(json.dumps(build_node_object))
+
+                artifact_hash = hashlib.sha256(artifact_file_path.read_bytes()).hexdigest()
+                print(f"Hash is {artifact_hash}")
+
+                rekorEntry = {
+                    "kind": "rekord",
+                    "apiVersion": "0.0.1",
+                    "spec": {
+                        "signature": {
+                            "format": "pgp",
+                            "content": base64.b64encode(detached_signature_file_contents.encode('ascii')).decode('ascii'),
+                            "publicKey": {
+                                "content": base64.b64encode(public_key_path.read_text().encode('ascii')).decode('ascii')
+                            }
+                        },
+                        "data": {
+                            "content": base64.b64encode(json.dumps(build_node_object).encode('ascii')).decode('ascii'),
+                            "hash": {
+                                "algorithm": "sha256",
+                                "value": artifact_hash
+                            }
+                        },
+                        "extraData": base64.b64encode(json.dumps(build_node_object).encode('ascii')).decode('ascii')
+                    }
+                }
+    
+                rekor_entry_path = Path(os.path.join(temp_dir.path,'entry.json'))
+                rekor_entry_path.write_text(json.dumps(rekorEntry))
+
+                sh.rekor( 
+                    'upload',
+                    '--rekor_server', "http://rekor-server-tssc-demo-rekor.apps.cluster-0302.0302.example.opentlc.com",
+                    '--entry', rekor_entry_path,
+                    _out=stdout_callback,
+                    _err_to_out=True,
+                    _tee='out'
+                )
+
+                # Output looks like this:
+                # Created entry at index 0, available at: 
+                # http://rekor-server-tssc-demo-rekor.apps.cluster-3627.3627.example.opentlc.com/api/v1/log/entries/1b64ae04c29363f8f6fa9731a0d1d47dedb0b97fd9b49e7e333b2e54cea060ff
+                log_urls = re.findall(
+                    RekorLog.REKOR_LOG_ENTRY_OUTPUT_REGEX,
+                    stdout_result.getvalue()
+                )
+
+                if len(log_urls) < 1:
+                    raise Exception(
+                        "Error getting rekor upload log entry."
+                        "  See stdout and stderr for more info."
+                    )
+                log_url = log_urls[0]
+
+                print(
+                    "Logged signed artifact at "
+                    f"url='{log_url}'"
+                )
+
+            except sh.ErrorReturnCode as error:
+                raise StepRunnerException(
+                    f"Error uploading to the rekor log: {error}"
+                ) from error
+
+            return log_url
+
+
+    def __verify_sig(
         self,
         signature_file_path,
-        private_key_fingerprint
+        artifact_file_path,
+        private_key_fingerprint,
     ):
         # GPG_OUTPUT_REGEX = re.compile(r"using RSA key ([A-Za-z0-9]+).*(Good signature)", re.DOTALL)
         GPG_OUTPUT_REGEX = re.compile(f"using RSA key {private_key_fingerprint}.*Good signature", re.DOTALL)
@@ -171,8 +275,8 @@ class TestStepImplementerRekorLogSourceBase(BaseStepImplementerTestCase):
                 ])
 
                 sh.gpg( 
-                    '--output', output_path,
-                    '--decrypt', signature_file_path,
+                    '--verify', signature_file_path,
+                    artifact_file_path,
                     _out=stdout_callback,
                     _err_to_out=True,
                     _tee='out'
@@ -184,16 +288,16 @@ class TestStepImplementerRekorLogSourceBase(BaseStepImplementerTestCase):
                 )
 
                 if len(verify_matches) < 1:
-                    raise Exception (
-                       f"Bad signature or not signed by {private_key_fingerprint}"
-                    )
-                
-                return Path(output_path).read_text()
-    
+                    return False
+
             except sh.ErrorReturnCode as error:
-                raise Exception(
+                print(
                     f"Error verifying sig with gpg: {error}"
-                ) from error
+                )
+                return False
+            
+            # if here, then verification successful
+            return True
 
 
     # @patch('sh.curl', create=True)

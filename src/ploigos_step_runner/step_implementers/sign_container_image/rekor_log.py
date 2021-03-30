@@ -262,7 +262,7 @@ class RekorLog(StepImplementer):
                 '--armor',
                 '-u', private_key_fingerprint,
                 '--output', signature_file_path,
-                '--sign',
+                '--detach-sig',
                 _out=stdout_callback,
                 _err_to_out=True,
                 _tee='out',
