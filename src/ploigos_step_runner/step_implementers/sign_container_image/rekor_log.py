@@ -232,6 +232,55 @@ class RekorLog(StepImplementer):
             ) from error
 
     @staticmethod
+#    def __sign_build_output_node(self):
+    def sign_build_output_node(
+        build_output_node,
+        private_key_fingerprint,
+        signature_file_path
+    ):
+        """Signs a build output node
+
+        Raises
+        ------
+        StepRunnerException
+            If error signing the node
+        """
+
+        
+        try:
+            stdout_result = StringIO()
+            stdout_callback = create_sh_redirect_to_multiple_streams_fn_callback([
+                sys.stdout,
+                stdout_result
+            ])
+
+            sig_file=Path(signature_file_path)
+            if sig_file.exists():
+                sig_file.unlink()
+
+            sh.gpg( 
+                '--armor',
+                '-u', private_key_fingerprint,
+                '--output', signature_file_path,
+                '--sign',
+                _out=stdout_callback,
+                _err_to_out=True,
+                _tee='out',
+                _in=json.dumps(build_output_node)
+            )
+
+            sig_file=Path(signature_file_path)
+            if not sig_file.is_file():
+                raise StepRunnerException(
+                    f"No artifact signature file was created at: {signature_file_path}"
+                ) 
+ 
+        except sh.ErrorReturnCode as error:
+            raise StepRunnerException(
+                f"Error signing artifact with gpg: {error}"
+            ) from error
+
+    @staticmethod
 #    def __create_build_output_node( # pylint: disable=too-many-arguments
     def create_build_output_node( # pylint: disable=too-many-arguments
         step_name,
@@ -261,9 +310,6 @@ class RekorLog(StepImplementer):
         outputJson = json.dumps(build_node_data)
 
         return outputJson
-    #     outputfile = Path(output_artifact_path)
-    #     outputfile.read_text()
-    # # FIXME: read in a file, run a regex across it, output to a file and return path to it
 
     @staticmethod
     def __log_artifact(  # pylint: disable=too-many-arguments
