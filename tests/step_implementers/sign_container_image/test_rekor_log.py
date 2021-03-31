@@ -89,169 +89,61 @@ class TestStepImplementerRekorLogSourceBase(BaseStepImplementerTestCase):
         expected_defaults = {}
         self.assertEqual(defaults, expected_defaults)
 
+    def test_run_step_pass(self):
+        with TempDirectory() as temp_dir:
+            results_dir_path = os.path.join(temp_dir.path, 'step-runner-results')
+            results_file_name = 'step-runner-results.yml'
+            work_dir_path = os.path.join(temp_dir.path, 'working')
+            example_results_path = os.path.join(os.path.dirname(__file__),
+                                                        '../../files',
+                                                        'example-step-runner-results.yml')
+            container_sig_file_path = example_results_path
+
+            # Make sure there is actually a file where the results file should be as this is what
+            # the RekorLog signs   
+            results_file_path=Path(os.path.join(results_dir_path,results_file_name))
+            if not os.path.exists(results_dir_path):
+                os.makedirs(results_dir_path)
+            results_file_path.write_text(Path(example_results_path).read_text())
+
+            step_config = {
+                'rekor-server-url': "http://rekor-server-tssc-demo-rekor.apps.cluster-0302.0302.example.opentlc.com",
+                'container-image-signature-private-key-fingerprint': self.TESTS_GPG_KEY_FINGERPRINT,
+            }
+
+            artifact_config = {
+                'container-image-signature-file-path': {'value': f'{container_sig_file_path}'}
+            }
+            self.setup_previous_result(work_dir_path, artifact_config)
+
+            step_implementer = self.create_step_implementer(
+                step_config=step_config,
+                step_name='validate-environment-configuration',
+                implementer='RekorLog',
+                results_dir_path=results_dir_path,
+                results_file_name=results_file_name,
+                work_dir_path=work_dir_path,
+            )
+
+            result = step_implementer._run_step()
+
+            final_log_entry_url=result.get_artifact_value('final-log-entry-url')
+            print(f"Got log entry url of: {final_log_entry_url}")
+            self.assertIsNotNone(final_log_entry_url)
+
+            final_log_entry_uuid=result.get_artifact_value('final-log-entry-uuid')
+            print(f"Got log entry uuid of: {final_log_entry_uuid}")
+            self.assertIsNotNone(final_log_entry_uuid)
+
     def test__required_config_or_result_keys(self):
         required_keys = RekorLog._required_config_or_result_keys()
         expected_required_keys = [
             'container-image-signature-file-path',
             'container-image-signature-private-key-fingerprint',
-            'container-image-signature-name',
-            'rekor-server-url',
-            'artifact-signature-file-path',
-        # curl-push
-            'container-image-signature-server-password',
-            'container-image-signature-server-url',
-            'container-image-signature-server-username'
+            'rekor-server-url'
         ]
         self.assertEqual(required_keys, expected_required_keys)
     
-    def test__create_build_output_node(self):
-        example_output_file_path = os.path.join(
-            os.path.dirname(__file__),
-            '../../files',
-            'example-step-runner-results.yml'
-            )
-
-        step_name = 'test-rekor-log'
-        previous_rekor_entry_uuid = '1234-56789'
-        
-        buildNodeContent = RekorLog.create_build_output_node(
-            step_name = step_name,
-            output_artifact_path = example_output_file_path,
-            previous_rekor_entry_uuid = previous_rekor_entry_uuid
-        )
-
-        buildNodeObj = json.loads(buildNodeContent)
-
-        outputFileText = Path(example_output_file_path).read_text()
-        stepOutputText = base64.b64decode(buildNodeObj['stepOutput'].encode('ascii')).decode('ascii')
-
-        self.assertEqual(outputFileText, stepOutputText)
-        self.assertEqual(buildNodeObj['stepName'], step_name)
-        self.assertEqual(buildNodeObj['previousRekorUUID'], previous_rekor_entry_uuid)
-
-        return buildNodeObj
-
-    def test__sign_build_output_node(self):
-        with TempDirectory() as temp_dir:
-            local_signature_file_path = os.path.join(temp_dir.path, 'node-sig.asc')
-    
-            buildNodeObj = self.test__create_build_output_node()
-
-            RekorLog.sign_build_output_node(
-                build_output_node=buildNodeObj,
-                private_key_fingerprint=self.TESTS_GPG_KEY_FINGERPRINT, 
-                signature_file_path=local_signature_file_path
-            )
-
-            artifact_file_path=os.path.join(temp_dir.path, 'node.json')
-            Path(artifact_file_path).write_text(json.dumps(buildNodeObj))
-
-
-            self.assertTrue(self.__verify_sig(
-                        signature_file_path=local_signature_file_path,
-                        artifact_file_path=artifact_file_path,
-                        private_key_fingerprint=self.TESTS_GPG_KEY_FINGERPRINT
-            ))
-        
-            return buildNodeObj, Path(local_signature_file_path).read_text()
-
-    def test__upload_to_rekor(self):
-        with TempDirectory() as temp_dir:
-            build_node_object, detached_signature_file_contents = self.test__sign_build_output_node()
-
-            try:
-                stdout_result = StringIO()
-                stdout_callback = create_sh_redirect_to_multiple_streams_fn_callback([
-                    sys.stdout,
-                    stdout_result
-                ])
-
-                public_key_path = Path(os.path.join(temp_dir.path, 'test.pub'))
-                signature_file_path = Path(os.path.join(temp_dir.path, 'node-sig.asc'))
-                signature_file_path.write_text(detached_signature_file_contents)
-
-                print(f"Attempting to export public key for {self.TESTS_GPG_KEY_FINGERPRINT} to {public_key_path}")
-                sh.gpg(
-                    '--export',
-                    '--armor',
-                    '--output', public_key_path,
-                    self.TESTS_GPG_KEY_FINGERPRINT,
-                    _out=stdout_callback,
-                    _err_to_out=True,
-                    _tee='out'
-                )
-
-                print(
-                    f"Public key for {self.TESTS_GPG_KEY_FINGERPRINT} exported to {public_key_path}"
-                )
-
-                artifact_file_path=Path(os.path.join(temp_dir.path, 'node.json'))
-                artifact_file_path.write_text(json.dumps(build_node_object))
-
-                artifact_hash = hashlib.sha256(artifact_file_path.read_bytes()).hexdigest()
-                print(f"Hash is {artifact_hash}")
-
-                rekorEntry = {
-                    "kind": "rekord",
-                    "apiVersion": "0.0.1",
-                    "spec": {
-                        "signature": {
-                            "format": "pgp",
-                            "content": base64.b64encode(detached_signature_file_contents.encode('ascii')).decode('ascii'),
-                            "publicKey": {
-                                "content": base64.b64encode(public_key_path.read_text().encode('ascii')).decode('ascii')
-                            }
-                        },
-                        "data": {
-                            "content": base64.b64encode(json.dumps(build_node_object).encode('ascii')).decode('ascii'),
-                            "hash": {
-                                "algorithm": "sha256",
-                                "value": artifact_hash
-                            }
-                        },
-                        "extraData": base64.b64encode(json.dumps(build_node_object).encode('ascii')).decode('ascii')
-                    }
-                }
-    
-                rekor_entry_path = Path(os.path.join(temp_dir.path,'entry.json'))
-                rekor_entry_path.write_text(json.dumps(rekorEntry))
-
-                sh.rekor( 
-                    'upload',
-                    '--rekor_server', "http://rekor-server-tssc-demo-rekor.apps.cluster-0302.0302.example.opentlc.com",
-                    '--entry', rekor_entry_path,
-                    _out=stdout_callback,
-                    _err_to_out=True,
-                    _tee='out'
-                )
-
-                # Output looks like this:
-                # Created entry at index 0, available at: 
-                # http://rekor-server-tssc-demo-rekor.apps.cluster-3627.3627.example.opentlc.com/api/v1/log/entries/1b64ae04c29363f8f6fa9731a0d1d47dedb0b97fd9b49e7e333b2e54cea060ff
-                log_urls = re.findall(
-                    RekorLog.REKOR_LOG_ENTRY_OUTPUT_REGEX,
-                    stdout_result.getvalue()
-                )
-
-                if len(log_urls) < 1:
-                    raise Exception(
-                        "Error getting rekor upload log entry."
-                        "  See stdout and stderr for more info."
-                    )
-                log_url = log_urls[0]
-                rekor_uuid = log_urls[0][1]
-
-                print(
-                    "Logged signed artifact at "
-                    f"url='{log_url}' uuid='{rekor_uuid}'"
-                )
-
-            except sh.ErrorReturnCode as error:
-                raise Exception(
-                    f"Error uploading to the rekor log: {error}"
-                ) from error
-
-            return rekor_uuid
 
 
     def __verify_sig(

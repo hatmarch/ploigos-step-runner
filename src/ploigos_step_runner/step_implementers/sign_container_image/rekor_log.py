@@ -32,6 +32,7 @@ Result Artifact Key                   | Description
 `artifact-signature-url`              | the URL where the sig can be found for the artifact
 """
 
+import os
 import re
 import sys
 from io import StringIO
@@ -40,6 +41,7 @@ from pathlib import Path
 import sh
 import base64
 import json
+import hashlib
 from ploigos_step_runner import StepImplementer
 from ploigos_step_runner.exceptions import StepRunnerException
 from ploigos_step_runner.step_result import StepResult
@@ -58,13 +60,13 @@ DEFAULT_CONFIG = {
 REQUIRED_CONFIG_OR_PREVIOUS_STEP_RESULT_ARTIFACT_KEYS = [
     'container-image-signature-file-path',
     'container-image-signature-private-key-fingerprint',
-    'container-image-signature-name',
+    # 'container-image-signature-name',
     'rekor-server-url',
-    'artifact-signature-file-path',
+    # 'artifact-signature-file-path',
 # curl-push
-    'container-image-signature-server-password',
-    'container-image-signature-server-url',
-    'container-image-signature-server-username'
+    # 'container-image-signature-server-password',
+    # 'container-image-signature-server-url',
+    # 'container-image-signature-server-username'
 ]
 
 class RekorLog(StepImplementer):
@@ -107,6 +109,67 @@ class RekorLog(StepImplementer):
         """
         return REQUIRED_CONFIG_OR_PREVIOUS_STEP_RESULT_ARTIFACT_KEYS
 
+    @property
+    def rekor_server_url(self):
+        """
+        Returns
+        -------
+        RekorServerUrl
+            The URL of the rekor server
+        """
+   
+    @staticmethod
+    def base64_encode(
+        file_path
+    ):
+        """Given a file_path, read and encode the contents in base64
+
+        Returns
+        -------
+        Base64Contents
+            base64 encoded string of file contents
+        """
+        return base64.b64encode(Path(file_path).read_text().encode('ascii')).decode('ascii')
+
+    def __export_public_key(self, 
+        private_key_fingerprint
+    ):
+        try:
+            stdout_result = StringIO()
+            stdout_callback = create_sh_redirect_to_multiple_streams_fn_callback([
+                sys.stdout,
+                stdout_result
+            ])
+
+            # Make sure there is no file at the public key path or the gpg will go
+            # interactive to ask us if we want to overwrite it
+            public_key_path = Path(os.path.join(self.work_dir_path_step, 'signature.pub'))
+            if public_key_path.exists():
+                public_key_path.unlink()
+
+            print(f"Attempting to export public key for {private_key_fingerprint} to {public_key_path}")
+            sh.gpg(
+                '--export',
+                '--armor',
+                '--output', public_key_path,
+                private_key_fingerprint,
+                _out=stdout_callback,
+                _err_to_out=True,
+                _tee='out'
+            )
+
+            print(
+                f"Public key for {private_key_fingerprint} exported to {public_key_path}"
+            )  
+        
+        except sh.ErrorReturnCode as error:
+            raise StepRunnerException(
+                f"Error signing artifact with gpg: {error}"
+            ) from error
+        
+        return public_key_path
+              
+
     def _run_step(self):
         """Runs the step implemented by this StepImplementer.
 
@@ -118,65 +181,36 @@ class RekorLog(StepImplementer):
         step_result = StepResult.from_step_implementer(self)
 
         # extract step results
-        artifact_file_path = self.get_value('container-image-signature-file-path')
-        container_signature_name = self.get_value('container-image-signature-name')
+        signature_file_path = self.get_value('container-image-signature-file-path')
         private_key_fingerprint = self.get_value('container-image-signature-private-key-fingerprint')
-        rekor_server_url = self.get_value('rekor-server-url')
-        artifact_signature_path = Path(self.get_value('artifact-signature-file-path'))
-
-        # extract configs
-        signature_server_url = self.get_value(
-            'container-image-signature-server-url'
-        )
-        signature_server_username = self.get_value(
-            'container-image-signature-server-username'
-        )
-        signature_server_password = self.get_value(
-            'container-image-signature-server-password'
-        )
+        self.__rekor_server_url=self.get_value('rekor-server-url')
 
         try:
-            RekorLog.__sign_artifact(
-                artifact_file_path=artifact_file_path,
-                private_key_fingerprint=private_key_fingerprint,
-                signature_file_path=artifact_signature_path
+            # only run conditionally based on environment
+
+            print("Signing artifact YML and storing in rekor")
+            build_artifact_path = Path(self.results_file_path)
+            rekor_log_entry_uuid, rekor_log_entry_url = self.sign_and_store_artifact(
+                previous_log_entry_uuid=0,   
+                artifact_file_path=build_artifact_path,
+                private_key_fingerprint=private_key_fingerprint
             )
-            log_url = RekorLog.__log_artifact( 
-                artifact_file_path=artifact_file_path,
-                rekor_server_url=rekor_server_url,
-                private_key_fingerprint=private_key_fingerprint,
-                signature_file_path=artifact_signature_path.absolute()
+
+            print(f"Binding the container signature to the build output artifacts at {rekor_log_entry_uuid}")
+            final_rekor_log_entry_uuid, final_rekor_log_entry_url = self.sign_and_store_artifact(
+                previous_log_entry_uuid=rekor_log_entry_uuid,
+                artifact_file_path=Path(signature_file_path),
+                private_key_fingerprint=private_key_fingerprint
+            )
+
+            # FIXME: Tag the image digest with the uuid
+
+            step_result.add_artifact(
+                name='final-log-entry-url', value=final_rekor_log_entry_url,
             )
 
             step_result.add_artifact(
-                name='provenance-log-entry-url', value=log_url,
-            )
-
-            # get the previous signature name and replace the last part with our 
-            # artifact signature to store it next to the container signature
-            new_nexus_signature_name =  re.sub( 
-                Path(container_signature_name).name,
-                artifact_signature_path.name,
-                container_signature_name)
-
-            # # Add these artifacts to attempt to reuse CurlPush to nexus
-            # step_result.add_artifact(
-            #     name='container-image-signature-name', value=new_nexus_signature_name
-            # )
-            # step_result.add_artifact(
-            #     name='container-image-signature-file-path', value=artifact_signature_path.absolute()
-            # )
-
-            artifact_signature_url = RekorLog.__store_artifact(
-                    container_image_signature_file_path=artifact_signature_path.absolute(),
-                    container_image_signature_name=new_nexus_signature_name,
-                    signature_server_url=signature_server_url,
-                    signature_server_username=signature_server_username,
-                    signature_server_password = signature_server_password
-                )
-            
-            step_result.add_artifact(
-                name='artifact-signature-url', value=artifact_signature_url,
+                name='final-log-entry-uuid', value=final_rekor_log_entry_uuid,
             )
 
         except StepRunnerException as error:
@@ -185,9 +219,55 @@ class RekorLog(StepImplementer):
 
         return step_result
 
+    def sign_and_store_artifact( self, # pylint: disable=too-many-arguments
+        previous_log_entry_uuid,
+        artifact_file_path,
+        private_key_fingerprint
+    ):
+        """Signs artifact at artifact_file_path with key at private_key_fingerprint and stores in Rekor
+
+        Notes
+        -----
+        Assumes that key for private_key_fingerprint has already been imported
+
+        Returns
+        -------
+        uuid
+            The uuid of the rekor log entry for this artifact
+        url
+            The url of the rekor log entry
+
+        Raises
+        ------
+        StepRunnerException
+            If error signing artifact or storing in Rekor
+        """
+
+        # Create a build output node around the artifact which we can store in Rekor
+        build_output_node = self.__create_build_output_node(
+            artifact_file_path=artifact_file_path,
+            previous_rekor_entry_uuid=previous_log_entry_uuid
+        )
+
+        # Specify where we want signature file to go
+        signature_file_path = Path(os.path.join(self.work_dir_path_step, 'node-sig.asc'))
+        RekorLog.__sign_artifact_contents(
+            artifact_contents=json.dumps(build_output_node),
+            private_key_fingerprint=private_key_fingerprint,
+            signature_file_path=signature_file_path
+        )
+
+        rekor_entry_uuid, rekor_entry_url = self.__log_build_output_node(  # pylint: disable=too-many-arguments
+            build_output_node=build_output_node,
+            private_key_fingerprint=private_key_fingerprint,
+            signature_file_path=signature_file_path
+        )
+
+        return rekor_entry_uuid, rekor_entry_url
+
     @staticmethod
-    def __sign_artifact(  # pylint: disable=too-many-arguments
-            artifact_file_path,
+    def __sign_artifact_contents(  # pylint: disable=too-many-arguments
+            artifact_contents,
             private_key_fingerprint,
             signature_file_path,
     ):
@@ -199,55 +279,6 @@ class RekorLog(StepImplementer):
             If error pushing image signature.
         """
 
-        
-        try:
-            stdout_result = StringIO()
-            stdout_callback = create_sh_redirect_to_multiple_streams_fn_callback([
-                sys.stdout,
-                stdout_result
-            ])
-
-            sig_file=Path(signature_file_path)
-            if sig_file.exists():
-                sig_file.unlink()
-
-            sh.gpg( 
-                '--armor',
-                '-u', private_key_fingerprint,
-                '--output', signature_file_path,
-                '--detach-sig', artifact_file_path,
-                _out=stdout_callback,
-                _err_to_out=True,
-                _tee='out'
-            )
-
-            sig_file=Path(signature_file_path)
-            if not sig_file.is_file():
-                raise StepRunnerException(
-                    f"No artifact signature file was created at: {signature_file_path}"
-                ) 
- 
-        except sh.ErrorReturnCode as error:
-            raise StepRunnerException(
-                f"Error signing artifact with gpg: {error}"
-            ) from error
-
-    @staticmethod
-#    def __sign_build_output_node(self):
-    def sign_build_output_node(
-        build_output_node,
-        private_key_fingerprint,
-        signature_file_path
-    ):
-        """Signs a build output node
-
-        Raises
-        ------
-        StepRunnerException
-            If error signing the node
-        """
-
-        
         try:
             stdout_result = StringIO()
             stdout_callback = create_sh_redirect_to_multiple_streams_fn_callback([
@@ -267,7 +298,7 @@ class RekorLog(StepImplementer):
                 _out=stdout_callback,
                 _err_to_out=True,
                 _tee='out',
-                _in=json.dumps(build_output_node)
+                _in=artifact_contents
             )
 
             sig_file=Path(signature_file_path)
@@ -281,11 +312,9 @@ class RekorLog(StepImplementer):
                 f"Error signing artifact with gpg: {error}"
             ) from error
 
-    @staticmethod
-#    def __create_build_output_node( # pylint: disable=too-many-arguments
-    def create_build_output_node( # pylint: disable=too-many-arguments
-        step_name,
-        output_artifact_path,
+    def __create_build_output_node( # pylint: disable=too-many-arguments
+        self,
+        artifact_file_path,
         previous_rekor_entry_uuid
     ):
         """Creates a build output node that is to be stored in the Rekor immutable database
@@ -297,25 +326,21 @@ class RekorLog(StepImplementer):
         """
 
         # Get the output artifact as base64 encoded
-        outputPath = Path(output_artifact_path)
-        if (not outputPath.exists() or not outputPath.is_file()):
+        if (not artifact_file_path.exists() or not artifact_file_path.is_file()):
             raise StepRunnerException(
-                f"Cannot open {outputPath.absolute()}"
+                f"Cannot open {artifact_file_path.absolute()}"
             )
 
         build_node_data = {
-            "stepName": step_name,
-            "stepOutput": base64.b64encode(outputPath.read_text().encode('ascii')).decode('ascii'),
+            "stepName": self.step_name,
+            "stepOutput": self.base64_encode(artifact_file_path),
             "previousRekorUUID": previous_rekor_entry_uuid
         }
-        outputJson = json.dumps(build_node_data)
 
-        return outputJson
+        return build_node_data
 
-    @staticmethod
-    def __log_artifact(  # pylint: disable=too-many-arguments
-            artifact_file_path,
-            rekor_server_url,
+    def __log_build_output_node(  self, # pylint: disable=too-many-arguments
+            build_output_node,
             private_key_fingerprint,
             signature_file_path
     ):
@@ -334,34 +359,30 @@ class RekorLog(StepImplementer):
                 stdout_result
             ])
 
-            public_key_path = Path("public.pgp")
+            public_key_path = self.__export_public_key(private_key_fingerprint)
 
-            # gpg will to to console if the public key exists already
-            if (public_key_path.exists()):
-                print(f"Removing existing public key at {public_key_path.absolute()}")
-                public_key_path.unlink()
+            artifact_file_path=Path(os.path.join(self.work_dir_path, 'node.json'))
+            if artifact_file_path.exists():
+                artifact_file_path.unlink()
+            artifact_file_path.write_text(json.dumps(build_output_node))
 
-            print(f"Attempting to export public key for {private_key_fingerprint} to {public_key_path.absolute()}")
-            sh.gpg(
-                '--export',
-                '--armor',
-                '--output', public_key_path.absolute(),
-                private_key_fingerprint,
-                _out=stdout_callback,
-                _err_to_out=True,
-                _tee='out'
+
+            rekor_entry = RekorLog.__create_rekor_entry(
+                artifact_file_path,
+                public_key_path,
+                signature_file_path,
             )
 
-            print(
-                f"Public key for {private_key_fingerprint} exported to {public_key_path.absolute()}"
-            )
+            # need to write the rekor entry to disk before we can upload it
+            rekor_entry_path = Path(os.path.join(self.work_dir_path,'entry.json'))
+            if rekor_entry_path.exists():
+                rekor_entry_path.unlink()
+            rekor_entry_path.write_text(json.dumps(rekor_entry))
 
             sh.rekor( 
                 'upload',
-                '--rekor_server', rekor_server_url,
-                '--public-key', public_key_path.absolute(),
-                '--signature',  signature_file_path,
-                '--artifact',  artifact_file_path,
+                '--rekor_server', self.__rekor_server_url,
+                '--entry', rekor_entry_path.absolute(),
                 _out=stdout_callback,
                 _err_to_out=True,
                 _tee='out'
@@ -377,14 +398,21 @@ class RekorLog(StepImplementer):
 
             if len(log_urls) < 1:
                 raise StepRunnerException(
-                    "Error getting rekor upload log entry."
+                    "Error getting rekor upload log url"
                     "  See stdout and stderr for more info."
                 )
-            log_url = log_urls[0]
+
+            if len(log_urls[0]) < 2:
+                raise StepRunnerException(
+                    "Error getting rekor upload log entry uuid"
+                    "  See stdout and stderr for more info."
+            )
+            log_entry_url = log_urls[0][0]
+            log_entry_uuid = log_urls[0][1]
 
             print(
                 "Logged signed artifact at "
-                f"url='{log_url}'"
+                f"url='{log_entry_url}' uuid='{log_entry_uuid}'"
             )
 
         except sh.ErrorReturnCode as error:
@@ -392,7 +420,42 @@ class RekorLog(StepImplementer):
                 f"Error uploading to the rekor log: {error}"
             ) from error
 
-        return log_url
+        return log_entry_uuid, log_entry_url
+
+    @staticmethod
+    def __create_rekor_entry(  # pylint: disable=too-many-arguments
+        artifact_file_path,
+        public_key_path,
+        signature_file_path,
+    ):
+        artifact_hash = hashlib.sha256(artifact_file_path.read_bytes()).hexdigest()
+        # print(f"Hash is {artifact_hash}")
+        base64_encoded_artifact = RekorLog.base64_encode(artifact_file_path)
+
+        rekor_entry = {
+            "kind": "rekord",
+            "apiVersion": "0.0.1",
+            "spec": {
+                "signature": {
+                    "format": "pgp",
+                    "content": RekorLog.base64_encode(signature_file_path),
+                    "publicKey": {
+                        "content": RekorLog.base64_encode(public_key_path)
+                    }
+                },
+                "data": {
+                    "content": base64_encoded_artifact,
+                    "hash": {
+                        "algorithm": "sha256",
+                        "value": artifact_hash
+                    }
+                },
+                "extraData": base64_encoded_artifact
+            }
+        }
+
+        return rekor_entry;
+
 
     @staticmethod
     def __store_artifact(  # pylint: disable=too-many-arguments
@@ -402,7 +465,7 @@ class RekorLog(StepImplementer):
         signature_server_username,
         signature_server_password
     ):
-        """Logs the artifact file path in rekor
+        """Stores an artifact in nexus
 
         Raises
         ------
