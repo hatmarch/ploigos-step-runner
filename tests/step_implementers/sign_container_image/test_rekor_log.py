@@ -239,18 +239,19 @@ class TestStepImplementerRekorLogSourceBase(BaseStepImplementerTestCase):
                         "  See stdout and stderr for more info."
                     )
                 log_url = log_urls[0]
+                rekor_uuid = log_urls[0][1]
 
                 print(
                     "Logged signed artifact at "
-                    f"url='{log_url}'"
+                    f"url='{log_url}' uuid='{rekor_uuid}'"
                 )
 
             except sh.ErrorReturnCode as error:
-                raise StepRunnerException(
+                raise Exception(
                     f"Error uploading to the rekor log: {error}"
                 ) from error
 
-            return log_url
+            return rekor_uuid
 
 
     def __verify_sig(
@@ -264,8 +265,6 @@ class TestStepImplementerRekorLogSourceBase(BaseStepImplementerTestCase):
 
         with TempDirectory() as temp_dir:
             signature_file_path=Path(signature_file_path)
-
-            output_path=os.path.join(temp_dir.path,'output.json')
 
             try:
                 stdout_result = StringIO()

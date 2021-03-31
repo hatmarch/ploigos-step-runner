@@ -72,7 +72,8 @@ class RekorLog(StepImplementer):
     of an artifact (image signature).
     """
 
-    REKOR_LOG_ENTRY_OUTPUT_REGEX = re.compile(r"available at: *([^ ]+)\n$", re.MULTILINE)
+    # See also: https://bit.ly/3rD5Acg
+    REKOR_LOG_ENTRY_OUTPUT_REGEX = re.compile(r"available at: *([^ ]+/([^ ]+))\n", re.MULTILINE)
 
     @staticmethod
     def step_implementer_config_defaults():
