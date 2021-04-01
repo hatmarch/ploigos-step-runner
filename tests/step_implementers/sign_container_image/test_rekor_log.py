@@ -97,7 +97,10 @@ class TestStepImplementerRekorLogSourceBase(BaseStepImplementerTestCase):
             example_results_path = os.path.join(os.path.dirname(__file__),
                                                         '../../files',
                                                         'example-step-runner-results.yml')
-            container_sig_file_path = example_results_path
+            # This is a binary signature as would be created by podman image sign
+            container_sig_file_path = os.path.join(os.path.dirname(__file__),
+                                                        '../../files',
+                                                        'example-container-signature')
 
             # Make sure there is actually a file where the results file should be as this is what
             # the RekorLog signs   

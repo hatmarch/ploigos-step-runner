@@ -129,7 +129,17 @@ class RekorLog(StepImplementer):
         Base64Contents
             base64 encoded string of file contents
         """
-        return base64.b64encode(Path(file_path).read_text().encode('ascii')).decode('ascii')
+        
+        #Assume the file is text and catch Unicode exception if not
+        encoding = None 
+
+        try:
+            encoding = Path(file_path).read_text().encode('ascii')
+        except UnicodeDecodeError:
+            encoding = Path(file_path).read_bytes()
+            pass
+
+        return base64.b64encode(encoding).decode('ascii')
 
     def __export_public_key(self, 
         private_key_fingerprint
@@ -196,7 +206,8 @@ class RekorLog(StepImplementer):
                 private_key_fingerprint=private_key_fingerprint
             )
 
-            print(f"Binding the container signature to the build output artifacts at {rekor_log_entry_uuid}")
+            print(f"Binding the container signature at {signature_file_path} to the build output artifacts at {rekor_log_entry_uuid}")
+
             final_rekor_log_entry_uuid, final_rekor_log_entry_url = self.sign_and_store_artifact(
                 previous_log_entry_uuid=rekor_log_entry_uuid,
                 artifact_file_path=Path(signature_file_path),
